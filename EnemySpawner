@@ -1,0 +1,517 @@
+using System;
+using System.Collections;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using UnityEngine;
+using System.Linq;
+public class EnemySpawner : UnitySingleton<EnemySpawner>
+{
+    [SerializeField] List<SpawnEnemy> listEnemyType;
+    [SerializeField] CompassControl compassControl;
+    [SerializeField] float spawnMinDistance = 10.0f;
+    [SerializeField] float spawnMaxDistance = 100.0f;
+    public bool shadowSetting = true;
+    public enum eSpawnType
+    {
+        eRandom,
+        ePack,
+        eBehind,
+    }
+    Dictionary<string, List<GameObject>> dicEnemies = new Dictionary<string, List<GameObject>>();
+    ConcurrentQueue<SpawnElement> spawnQueue = new ConcurrentQueue<SpawnElement>();
+    List<ActiveEnemyData> listActiveEnemyData = new List<ActiveEnemyData>();
+    List<ActiveEnemyData> listActiveEnemyData2 = new List<ActiveEnemyData>();
+    float distanceModifier;
+    Vector3 dir = Vector3.zero;
+    int testSpawnCount = 0;
+    // Start is called before the first frame update
+    void Awake()
+    {
+        foreach (SpawnEnemy item in listEnemyType)
+        {
+            List<GameObject> list = new List<GameObject>();
+            for (int i = 0; i < item.maxInstance; ++i)
+            {
+                GameObject gb = Instantiate(item.enemy, transform);
+                EnemyMove em = gb.GetComponent<EnemyMove>();
+                if (em != null)
+                {
+                    em.useShadow = shadowSetting;
+                }
+                //gb.GetComponent<EnemyState>().life = item.life;
+                gb.SetActive(false);
+                list.Add(gb);
+            }
+            dicEnemies.Add(item.name, list);
+        }
+    }
+    private void Start()
+    {
+        StartCoroutine(SpawnEnemy());
+        StartCoroutine(SearchActiveEnemy());
+        SetDistanceModifier();
+    }
+    private void OnDestroy()
+    {
+        StopCoroutine(SpawnEnemy());
+        StopCoroutine(SearchActiveEnemy());
+    }  
+    IEnumerator SpawnEnemy()
+    {
+        EnemyState spawnEnemyState;
+        SpawnElement spawn;
+        RaycastHit hit;
+        while (true)
+        {
+            if (spawnQueue.Count > 0)
+            {
+                if (spawnQueue.TryPeek(out spawn) == true)
+                {
+                    foreach (GameObject gb in dicEnemies[spawn.name])
+                    {
+                        if (spawn.spawnCount <= 0)
+                        {
+                            spawnQueue.TryDequeue(out spawn);
+                            break;
+                        }
+                        if (gb.activeSelf == false)
+                        {
+                            while (true)
+                            {
+                                Vector3 randomPos = Vector3.zero;
+                                switch (spawn.spawnType)
+                                {
+                                    case eSpawnType.eRandom:
+                                        {
+                                            randomPos = new Vector3(UnityEngine.Random.Range(-1.0f, 1.0f), 0, UnityEngine.Random.Range(-1.0f, 1.0f));
+                                            randomPos = PlayerManager.I.player.transform.position + randomPos.normalized * UnityEngine.Random.Range(spawnMinDistance, spawnMaxDistance); 
+                                        }
+                                        break;
+                                    case eSpawnType.ePack:
+                                        {
+                                            randomPos = new Vector3(UnityEngine.Random.Range(-50.0f, 50.0f), 0, UnityEngine.Random.Range(-50.0f, 50.0f));
+                                            randomPos = PlayerManager.I.player.transform.position +
+                                                PlayerManager.I.player.transform.forward * 200.0f + 
+                                                randomPos;
+                                        }
+                                        break;
+                                    case eSpawnType.eBehind:
+                                        {
+                                            randomPos = new Vector3(UnityEngine.Random.Range(-50.0f, 50.0f), 0, UnityEngine.Random.Range(-50.0f, 50.0f));
+                                            randomPos = PlayerManager.I.player.transform.position -
+                                                PlayerManager.I.player.transform.forward * 200.0f +
+                                                randomPos;
+                                        }
+                                        break;
+                                }
+                                float x = randomPos.x;
+                                float z = randomPos.z;
+                                float y = TerrainManager.I.GetTerrainHeight(x, z);
+                                randomPos.y = y;
+                                Physics.Raycast(randomPos + Vector3.up, -Vector3.up, out hit, 100.0f);
+                                if (hit.transform != null)
+                                {
+                                    if (hit.transform.gameObject.CompareTag("Ground") == true ||
+                                        hit.transform.gameObject.CompareTag("Water") == true)
+                                    {
+                                        gb.transform.position = new Vector3(x, y, z);
+                                        gb.transform.up = TerrainManager.I.GetTerrainNormal(x, z);
+                                        gb.transform.localRotation = Quaternion.Euler(0, UnityEngine.Random.Range(0.0f, 360.0f), 0);
+                                        //gb.transform.position = hit.point + gb.GetComponent<GS008MonsterMove>().colliderHeight;
+                                        Debug.Log(spawn.name);
+                                        break;
+                                    }
+                                }
+                                yield return null;
+                            }
+                            spawnEnemyState = gb.GetComponent<EnemyState>();
+                            spawnEnemyState.level = spawn.level;
+                            spawnEnemyState.life = spawn.life;
+                            spawnEnemyState.damage = spawn.damage;
+                            spawnEnemyState.speed = spawn.speed;
+                            gb.SetActive(true);
+                            if (spawn.level > 99)
+                            {
+                                compassControl.ActivateBossCompass(gb);
+                            }
+                            spawn.spawnCount--; 
+                            yield return null;
+                        }
+                    }
+                }
+            }
+            yield return null;
+        }
+        yield return null;
+    }
+    IEnumerator SearchActiveEnemy()
+    {
+        Vector3 position = Vector3.zero;
+        Vector3 distance = Vector3.zero;
+        Vector3 direction = Vector3.zero;
+        float isRight = 1.0f; 
+        while (true)
+        {
+            listActiveEnemyData2.Clear();
+            position = PlayerManager.I.player.transform.position;
+            direction = PlayerManager.I.player.transform.forward;
+            foreach (List<GameObject> list in dicEnemies.Values)
+            {
+                foreach (GameObject go in list) 
+                {
+                    if (go.activeSelf == false) continue;
+                    EnemyState es = go.GetComponent<EnemyState>();
+                    if (es.isDead == true || es.isInvincible == true) continue;
+                    distance = go.transform.position - position;
+                    distance.y = 0;
+                    //isRight = Vector3.Dot(PlayerManager.I.player.transform.right, distance) >= 0.0f ? 1.0f : -1.0f; 
+                    ActiveEnemyData aed = new ActiveEnemyData(es, distance.magnitude, Mathf.Acos(Vector3.Dot(distance.normalized, direction.normalized)) * Mathf.Rad2Deg * isRight);
+                    if (listActiveEnemyData2.Count == 0) listActiveEnemyData2.Add(aed);
+                    else
+                    {
+                        for (int i = 0; i < listActiveEnemyData2.Count; i++)
+                        {
+                            if (i == listActiveEnemyData2.Count - 1 && listActiveEnemyData2[i].distance <= aed.distance)
+                            {
+                                listActiveEnemyData2.Insert(listActiveEnemyData2.Count, aed);
+                                break;
+                            }
+                            if (listActiveEnemyData2[i].distance > aed.distance)
+                            {
+                                listActiveEnemyData2.Insert(i, aed);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            listActiveEnemyData = listActiveEnemyData2.ToList();
+            yield return new WaitUntil(() => { return TimeManager.I.isPause == false; });
+        }
+        yield return null;  
+    }
+    int GetSpawnedEnemyCount()
+    {
+        int result = 0;
+        foreach (List<GameObject> list in dicEnemies.Values)
+        {
+            foreach (GameObject go in list)
+            {
+                if (go.activeSelf == false) continue;
+                result++;
+            }
+        }
+        return result;
+    }
+    public GameObject GetClosestEnemy(Vector3 position, Vector3 direction, float angleThreshold, float distanceThreshold)
+    {
+        for (int i = 0; i < listActiveEnemyData.Count; i++)
+        {
+            ActiveEnemyData aed = listActiveEnemyData[i];
+            if (aed.distance < distanceThreshold * distanceModifier && Mathf.Abs(aed.angle) < angleThreshold)
+            {
+                return aed.enemyState.gameObject;
+            }
+            if (aed.distance > distanceThreshold)
+            {
+                break;
+            }
+        }
+        return null;
+
+
+        //float minDist = float.MaxValue;
+        //GameObject result = null;
+        //foreach (List<GameObject> list in dicEnemies.Values)
+        //{
+        //    foreach (GameObject go in list)
+        //    {
+        //        if (go.activeSelf == false) continue;
+        //        if (go.GetComponent<EnemyState>().isDead == true) continue;
+        //        dir = go.transform.position - position;
+        //        float dist = (go.transform.position - position).magnitude;
+        //        float angle = Mathf.Acos(Vector3.Dot(direction.normalized, dir.normalized)) * Mathf.Rad2Deg;
+        //        if (dist < distanceThreshold && dist < minDist && angle < angleThreshold)
+        //        {
+        //            minDist = dist;
+        //            result = go;
+        //        }
+        //    }
+        //}
+        //return result;
+    }
+    public GameObject GetBackClosestEnemy(Vector3 position, Vector3 direction, float minAngle, float maxAngle, float distanceThreshold)
+    {
+        for (int i = 0; i < listActiveEnemyData.Count; i++)
+        {
+            ActiveEnemyData aed = listActiveEnemyData[i];
+            //-130      130
+            if (aed.distance < distanceThreshold * distanceModifier)
+            {
+                if((minAngle > aed.angle && -180 <= aed.angle) || (maxAngle < aed.angle && 180 >= aed.angle))
+                {
+                    return aed.enemyState.gameObject;
+                }
+            }
+            if (aed.distance > distanceThreshold)
+            {
+                break;
+            }
+        }
+        return null;
+    }
+
+    public GameObject GetClosestEnemy(Vector3 position, Vector3 direction, float minAngle, float maxAngle, float distanceThreshold)
+    {
+        for (int i = 0; i < listActiveEnemyData.Count; i++)
+        {
+            ActiveEnemyData aed = listActiveEnemyData[i];
+            if (aed.distance < distanceThreshold * distanceModifier && minAngle < Mathf.Abs(aed.angle) && maxAngle > Mathf.Abs(aed.angle))
+            {
+                return aed.enemyState.gameObject;
+            }
+            if (aed.distance > distanceThreshold)
+            {
+                break;
+            }
+        }
+        return null; 
+    }
+    public void GetInRangeMonster(Vector3 position, Vector3 direction, float angleThreshold, float distanceThreshold, List<EnemyState> enemyList)
+    {
+        enemyList.Clear();
+        for (int i = 0; i < listActiveEnemyData.Count; i++)
+        {
+            ActiveEnemyData aed = listActiveEnemyData[i]; 
+            if (aed.distance < distanceThreshold * distanceModifier && Mathf.Abs(aed.angle) < angleThreshold)
+            {
+                enemyList.Add(aed.enemyState);
+            }
+            else if (aed.distance > distanceThreshold)
+            {
+                break;
+            }
+        }
+
+        //enemyList.Clear();
+        //foreach(List<GameObject> list in dicEnemies.Values)
+        //{
+        //    foreach(GameObject go in list)
+        //    {
+        //        if(go.activeSelf == false) continue;
+        //        if (go.GetComponent<EnemyState>().isDead == true) continue;
+        //        dir = go.transform.position - position;
+        //        float dist = (go.transform.position - position).magnitude;
+        //        float angle = Mathf.Acos(Vector3.Dot(direction.normalized, dir.normalized)) * Mathf.Rad2Deg;
+        //        if(dist < distanceThreshold && angle < angleThreshold)
+        //        {
+        //            enemyList.Add(go.GetComponent<EnemyState>());
+        //        }
+        //    }
+        //}
+    }
+    public void GetInRangeMonster(Vector3 position, Vector3 direction, float angleThreshold, float distanceThreshold, int countMax, List<EnemyState> enemyList)
+    {
+        int enemyCount = 0;
+        enemyList.Clear();
+        for (int i = 0; i < listActiveEnemyData.Count; i++)
+        {
+            ActiveEnemyData aed = listActiveEnemyData[i];
+            if (aed.distance < distanceThreshold * distanceModifier && Mathf.Abs(aed.angle) < angleThreshold)
+            {
+                enemyList.Add(aed.enemyState);
+                enemyCount++;
+            }
+            if (aed.distance > distanceThreshold || enemyCount >= countMax)
+            {
+                break;
+            }
+        }  
+
+        //int enemyCount = 0; 
+        //enemyList.Clear();
+        //foreach (List<GameObject> list in dicEnemies.Values)
+        //{
+        //    foreach (GameObject go in list)
+        //    {
+        //        if (go.activeSelf == false) continue;
+        //        if (go.GetComponent<EnemyState>().isDead == true) continue;
+        //        dir = go.transform.position - position;
+        //        float dist = (go.transform.position - position).magnitude;
+        //        float angle = Mathf.Acos(Vector3.Dot(direction.normalized, dir.normalized)) * Mathf.Rad2Deg;
+        //        if (dist < distanceThreshold && angle < angleThreshold)
+        //        {
+        //            if (enemyCount < countMax)
+        //            {
+        //                enemyList.Add(go.GetComponent<EnemyState>());
+        //                enemyCount++;
+        //            }
+        //            else break;
+        //        }
+        //    }
+        //}
+    }
+    public void SpawnEnemy(string name, int level, float life, float damage, float speed, int count, eSpawnType spawnType)
+    {
+        spawnQueue.Enqueue(new SpawnElement(name, level, life, damage, speed, count, spawnType));
+    }
+    public GameObject SpawnEnemyInstant(string name, int level, float life, float damage, float speed, int count, eSpawnType spawnType)
+    {
+        EnemyState spawnEnemyState;
+        SpawnElement spawn;
+        RaycastHit hit;
+        GameObject result = null;
+        if (dicEnemies.ContainsKey(name) == true)
+        {
+            List<GameObject> list = dicEnemies[name];
+            foreach (GameObject gb in list)
+            {
+                if (gb.activeSelf == false)
+                {
+                    while (true)
+                    { 
+                        Vector3 randomPos = Vector3.zero;
+                        switch (spawnType)
+                        {
+                            case eSpawnType.eRandom:
+                                {
+                                    randomPos = new Vector3(UnityEngine.Random.Range(-1.0f, 1.0f), 0, UnityEngine.Random.Range(-1.0f, 1.0f));
+                                    randomPos = PlayerManager.I.player.transform.position + randomPos.normalized * UnityEngine.Random.Range(spawnMinDistance, spawnMaxDistance);
+                                }
+                                break;
+                            case eSpawnType.ePack:
+                                {
+                                    randomPos = new Vector3(UnityEngine.Random.Range(-50.0f, 50.0f), 0, UnityEngine.Random.Range(-50.0f, 50.0f));
+                                    randomPos = PlayerManager.I.player.transform.position +
+                                        PlayerManager.I.player.transform.forward * 200.0f +
+                                        randomPos;
+                                }
+                                break;
+                            case eSpawnType.eBehind:
+                                {
+                                    randomPos = new Vector3(UnityEngine.Random.Range(-50.0f, 50.0f), 0, UnityEngine.Random.Range(-50.0f, 50.0f));
+                                    randomPos = PlayerManager.I.player.transform.position -
+                                        PlayerManager.I.player.transform.forward * 200.0f +
+                                        randomPos;
+                                }
+                                break;
+                        }
+                        float x = randomPos.x;
+                        float z = randomPos.z;
+                        float y = TerrainManager.I.GetTerrainHeight(x, z);
+                        randomPos.y = y;
+                        Physics.Raycast(randomPos + Vector3.up, -Vector3.up, out hit, 100.0f);
+                        if (hit.transform != null)
+                        {
+                            if (hit.transform.gameObject.CompareTag("Ground") == true ||
+                                hit.transform.gameObject.CompareTag("Water") == true)
+                            {
+                                gb.transform.position = new Vector3(x, y, z);
+                                gb.transform.up = TerrainManager.I.GetTerrainNormal(x, z);
+                                gb.transform.localRotation = Quaternion.Euler(0, UnityEngine.Random.Range(0.0f, 360.0f), 0);
+                                //gb.transform.position = hit.point + gb.GetComponent<GS008MonsterMove>().colliderHeight;
+                                break;
+                            }
+                        }
+                    }
+                    spawnEnemyState = gb.GetComponent<EnemyState>();
+                    spawnEnemyState.level = level;
+                    spawnEnemyState.life = life;
+                    spawnEnemyState.damage = damage;
+                    spawnEnemyState.speed = speed;
+                    gb.SetActive(true);
+                    result = gb;
+                    if (level > 99)
+                    {
+                        compassControl.ActivateBossCompass(gb);
+                    } 
+                    break;
+                }
+            }
+        }
+        return result;
+    }
+    public void SpawnBoss(eEnemyType type, Vector3 position)
+    {
+        switch (type)
+        {
+            case eEnemyType.eTypeBoss001:
+                {
+                    GameObject headObj = dicEnemies["Boss001_Head"][0];
+                    GameObject tailObj = dicEnemies["Boss001_Tail"][0]; 
+                    BossState001 head = headObj.GetComponent<BossState001>();
+                    BossState001 tail = tailObj.GetComponent<BossState001>();
+                    head.damage = 3.0f;
+                    tail.damage = 3.0f;
+                    head.head = null;
+                    head.tail = tail;
+                    tail.head = head;
+                    headObj.transform.position = position;
+                    tailObj.transform.position = position;
+                    headObj.SetActive(true);
+                    tailObj.SetActive(true);
+                    compassControl.ActivateBossCompass(headObj);
+                    for (int i = 1; i < dicEnemies["Boss001_Tail"].Count; i++)
+                    {
+                        headObj = dicEnemies["Boss001_Tail"][i - 1];
+                        tailObj = dicEnemies["Boss001_Tail"][i];
+                        head = headObj.GetComponent<BossState001>();
+                        tail = tailObj.GetComponent<BossState001>(); 
+                        tail.damage = 3.0f;
+                        head.tail = tail;
+                        tail.head = head; 
+                        tailObj.transform.position = position; 
+                        tailObj.SetActive(true);
+                    }
+                    tail.tail = null;
+                }
+                break;
+        }
+    }
+    public void SetDistanceModifier()
+    {
+        EnhanceList enhanceList;
+        if (DataManager.I.GetEnhance(eEnhanceType.eAttackRangeUp, out enhanceList) == true) distanceModifier = 1.0f + enhanceList.enhancePercent;
+        else distanceModifier = 1.0f; 
+    }
+}
+[Serializable]
+public class SpawnEnemy
+{
+    public string name;
+    public GameObject enemy;
+    public int maxInstance; 
+    public float life;
+}
+public class SpawnElement
+{
+    public string name;
+    public int level;
+    public float life;
+    public int spawnCount;
+    public float damage;
+    public float speed;
+    public EnemySpawner.eSpawnType spawnType;
+    public SpawnElement(string _name, int lv, float _life, float _damage, float _speed, int count, EnemySpawner.eSpawnType _spawnType)
+    {
+        name = _name;
+        level = lv;
+        life = _life;
+        damage = _damage;
+        speed = _speed;
+        spawnCount = count;
+        spawnType = _spawnType;
+    }
+}
+public class ActiveEnemyData
+{
+    public EnemyState enemyState;
+    public float distance;
+    public float angle;
+    public ActiveEnemyData(EnemyState es, float dist, float ang)
+    {
+        enemyState = es;
+        distance = dist;
+        angle = ang;
+    }
+}
